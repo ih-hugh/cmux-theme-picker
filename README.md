@@ -28,16 +28,20 @@ brew install fzf
 
 ## Install
 
+### Homebrew (recommended)
+
 ```bash
-# Clone
-git clone https://github.com/ih-hugh/cmux-theme-picker.git
-cd cmux-theme-picker
+brew tap ih-hugh/tap
+brew install cmux-theme-picker
+```
 
-# Symlink into your PATH
-ln -s "$(pwd)/cmux-theme-picker" ~/.local/bin/cmux-theme-picker
+### Manual
 
-# Or copy directly
-cp cmux-theme-picker /usr/local/bin/
+```bash
+# Download and install
+curl -sL https://github.com/ih-hugh/cmux-theme-picker/releases/latest/download/cmux-theme-picker \
+  -o ~/.local/bin/cmux-theme-picker
+chmod +x ~/.local/bin/cmux-theme-picker
 ```
 
 Make sure `cmux` is available in your `$PATH`. On macOS it's at:
