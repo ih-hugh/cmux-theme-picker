@@ -92,6 +92,19 @@ State is split into two groups:
 - **`orig-*`** files — saved once at startup, never modified. Used by Esc/revert to restore your original themes.
 - **`current-*`** files — updated on every preview. Shown in the fzf preview pane so you can see what's currently applied for each slot.
 
+## Themes
+
+cmux-theme-picker finds all theme files in your cmux/Ghostty theme directories. The built-in theme set includes 460+ themes from Ghostty's default library.
+
+For the [duskbox](https://github.com/ih-hugh/duskbox) theme family (16 OKLCH-designed variants with light, dark, high-contrast, and neon options), install them separately:
+
+```bash
+# Install duskbox themes into cmux
+git clone https://github.com/ih-hugh/duskbox.git /tmp/duskbox
+mkdir -p "$HOME/Library/Application Support/com.cmuxterm.app/themes"
+cp /tmp/duskbox/extras/ghostty/duskbox-* "$HOME/Library/Application Support/com.cmuxterm.app/themes/"
+```
+
 ## Theme directory
 
 Themes are loaded from the following directories (first match wins):
