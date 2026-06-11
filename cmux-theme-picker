@@ -1,0 +1,422 @@
+#!/usr/bin/env bash
+# cmux-theme-picker — Interactive cmux theme selector with live preview
+#
+# Usage:
+#   cmux-theme-picker          Pick a theme (auto-detects light/dark mode)
+#   cmux-theme-picker --light  Start in LIGHT slot mode
+#   cmux-theme-picker --dark   Start in DARK slot mode
+#   cmux-theme-picker --pair   Pick both light and dark separately
+#   cmux-theme-picker -h       Show help
+#
+# Key bindings in picker:
+#   Up/Down    Browse themes (live preview applied to terminal)
+#   Tab       Toggle between LIGHT / DARK slot
+#   Enter     Select theme (keeps current live preview)
+#   Esc       Cancel and revert to original themes
+#
+# Internal sub-commands (used by fzf bindings — do not call directly):
+#   _preview <name>    Show color swatch for theme
+#   _apply <name>      Apply theme to the active slot
+#   _toggle <name>     Toggle slot (light↔dark) and apply
+#   _prompt            Output the current fzf prompt string
+#   _revert            Revert to saved themes
+#   _cleanup           Remove temp state files
+#
+# Requirements: fzf >= 0.53 (brew install fzf), cmux
+
+set -euo pipefail
+
+CMUX_BIN="cmux"
+THEME_DIRS=(
+  "$HOME/Library/Application Support/com.cmuxterm.app/themes"
+  "$HOME/.config/ghostty/themes"
+  "/Applications/cmux.app/Contents/Resources/ghostty/themes"
+  "/Applications/Ghostty.app/Contents/Resources/ghostty/themes"
+)
+
+# State dir is passed via env var so fzf-spawned sub-commands can find it
+STATE_DIR="${CMUX_THEME_PICKER_STATE:-/tmp/cmux-theme-picker-$$}"
+SLOT_FILE="$STATE_DIR/slot"
+ORIG_LIGHT_FILE="$STATE_DIR/orig-light"   # Saved at startup, NEVER modified — used by _revert
+ORIG_DARK_FILE="$STATE_DIR/orig-dark"     # Saved at startup, NEVER modified — used by _revert
+CUR_LIGHT_FILE="$STATE_DIR/current-light"  # Updated by _apply/_toggle — used by _preview
+CUR_DARK_FILE="$STATE_DIR/current-dark"    # Updated by _apply/_toggle — used by _preview
+
+BOLD='\033[1m' DIM='\033[2m' RESET='\033[0m'
+GREEN='\033[32m' YELLOW='\033[33m' RED='\033[31m' CYAN='\033[36m'
+MAGENTA='\033[35m'
+
+die() { echo -e "${RED}error:${RESET} $*" >&2; exit 1; }
+strip_marker() { sed 's/^[★ ]* //'; }
+
+# ── Find a theme file by name (searches dirs in order) ──────────────────
+find_theme() {
+  local name="$1"
+  for dir in "${THEME_DIRS[@]}"; do
+    [ -f "$dir/$name" ] && { echo "$dir/$name"; return 0; }
+  done
+  return 1
+}
+
+# ── hex → RGB components ────────────────────────────────────────────────
+_hex_rgb() {
+  local h="$1"
+  printf '%d %d %d' $((16#${h:1:2})) $((16#${h:3:2})) $((16#${h:5:2}))
+}
+
+# ── List all unique theme names for fzf ────────────────────────────────
+list_themes() {
+  local seen=""
+  for dir in "${THEME_DIRS[@]}"; do
+    [ -d "$dir" ] || continue
+    for f in "$dir"/*; do
+      [ -f "$f" ] || continue
+      local name
+      name="$(basename "$f")"
+      echo "$seen" | grep -qxF "$name" && continue
+      seen="$seen
+$name"
+      if [[ "$name" == duskbox-* ]]; then
+        printf '\033[33m★\033[0m %s\n' "$name"
+      else
+        printf '  %s\n' "$name"
+      fi
+    done
+  done
+}
+
+# ── Internal sub-commands (short-circuit before arg parsing) ────────────
+case "${1:-}" in
+  _preview)
+    shift
+    __name="$(echo "${1:-}" | strip_marker)"
+    __path="$(find_theme "$__name")" || { echo "Theme not found: $__name"; exit 0; }
+    __slot="$(cat "$SLOT_FILE" 2>/dev/null || echo dark)"
+    __cur_l="$(cat "$CUR_LIGHT_FILE" 2>/dev/null || echo "")"
+    __cur_d="$(cat "$CUR_DARK_FILE" 2>/dev/null || echo "")"
+
+    # Slot indicator
+    if [ "$__slot" = "light" ]; then
+      printf "\033[38;2;255;200;50m☀ Editing LIGHT slot\033[0m  \033[2m(Tab → dark)\033[0m\n\n"
+    else
+      printf "\033[38;2;180;130;255m🌙 Editing DARK slot\033[0m  \033[2m(Tab → light)\033[0m\n\n"
+    fi
+
+    # Parse colors
+    bg="$(grep -E '^background\s*=' "$__path" | head -1 | sed 's/.*= *//' | awk '{print $1}')"
+    fg="$(grep -E '^foreground\s*=' "$__path" | head -1 | sed 's/.*= *//' | awk '{print $1}')"
+    cursor="$(grep -E '^cursor-color\s*=' "$__path" | head -1 | sed 's/.*= *//' | awk '{print $1}')"
+    sel_bg="$(grep -E '^selection-background\s*=' "$__path" | head -1 | sed 's/.*= *//' | awk '{print $1}')"
+    sel_fg="$(grep -E '^selection-foreground\s*=' "$__path" | head -1 | sed 's/.*= *//' | awk '{print $1}')"
+    accent="${cursor:-$fg}"
+
+    # Title
+    IFS=' ' read -r r g b <<< "$(_hex_rgb "$accent")"
+    printf "\033[38;2;%d;%d;%dm━━━ %s ━━━\033[0m\n" "$r" "$g" "$b" "$__name"
+    echo ""
+
+    # Background + foreground sample
+    IFS=' ' read -r r g b <<< "$(_hex_rgb "$bg")"; IFS=' ' read -r rf gf bf <<< "$(_hex_rgb "$fg")"
+    printf "\033[48;2;%d;%d;%dm\033[38;2;%d;%d;%dm  AaBbCc123 AaBbCc123  \033[0m\n" "$r" "$g" "$b" "$rf" "$gf" "$bf"
+
+    # Selection sample
+    if [ -n "$sel_bg" ]; then
+      IFS=' ' read -r r g b <<< "$(_hex_rgb "$sel_bg")"
+      if [ -n "${sel_fg:-}" ]; then IFS=' ' read -r rf gf bf <<< "$(_hex_rgb "$sel_fg")"; else IFS=' ' read -r rf gf bf <<< "$(_hex_rgb "$fg")"; fi
+      printf "\033[48;2;%d;%d;%dm\033[38;2;%d;%d;%dm  selected text  selected text  \033[0m\n" "$r" "$g" "$b" "$rf" "$gf" "$bf"
+    fi
+    echo ""
+
+    # ANSI palette: 2 rows × 8 blocks
+    for row_start in 0 8; do
+      line=""
+      for idx in $(seq "$row_start" $((row_start + 7))); do
+        c="$(grep -E "^palette\s*=\s*${idx}=" "$__path" | head -1 | sed 's/.*= *//;s/ .*//')"
+        [ -z "$c" ] && continue
+        IFS=' ' read -r r g b <<< "$(_hex_rgb "$c")"
+        line+="\033[48;2;${r};${g};${b}m      \033[0m "
+      done
+      echo -e "$line"
+    done
+    echo ""
+
+    # Key color values
+    printf "  %-20s %s\n" "background" "$bg"
+    printf "  %-20s %s\n" "foreground" "$fg"
+    printf "  %-20s %s\n" "cursor-color" "$cursor"
+    [ -n "$sel_bg" ] && printf "  %-20s %s\n" "selection-bg" "$sel_bg"
+    echo ""
+
+    # Current theme assignments
+    printf "  %sLight:%s %s" "$YELLOW" "$RESET" "$__cur_l"
+    printf "    %sDark:%s %s\n" "$MAGENTA" "$RESET" "$__cur_d"
+    echo ""
+    printf "  %s↑↓%s browse   %sTab%s toggle slot   %s↵%s select   %sEsc%s revert" "$CYAN" "$RESET" "$YELLOW" "$RESET" "$GREEN" "$RESET" "$RED" "$RESET"
+    exit 0
+    ;;
+
+  _apply)
+    shift
+    __theme_name="$(echo "${1:-}" | strip_marker)"
+    [ -z "$__theme_name" ] && exit 0
+    __slot="$(cat "$SLOT_FILE" 2>/dev/null || echo dark)"
+    if [ "$__slot" = "light" ]; then
+      $CMUX_BIN themes set --light "$__theme_name" >/dev/null 2>&1 || true
+      echo "$__theme_name" > "$CUR_LIGHT_FILE"
+    else
+      $CMUX_BIN themes set --dark "$__theme_name" >/dev/null 2>&1 || true
+      echo "$__theme_name" > "$CUR_DARK_FILE"
+    fi
+    $CMUX_BIN reload-config >/dev/null 2>&1 || true
+    exit 0
+    ;;
+
+  _toggle)
+    shift
+    __theme_name="$(echo "${1:-}" | strip_marker)"
+    __slot="$(cat "$SLOT_FILE" 2>/dev/null || echo dark)"
+    if [ "$__slot" = "light" ]; then
+      echo "dark" > "$SLOT_FILE"
+      if [ -n "$__theme_name" ]; then
+        $CMUX_BIN themes set --dark "$__theme_name" >/dev/null 2>&1 || true
+        echo "$__theme_name" > "$CUR_DARK_FILE"
+      fi
+    else
+      echo "light" > "$SLOT_FILE"
+      if [ -n "$__theme_name" ]; then
+        $CMUX_BIN themes set --light "$__theme_name" >/dev/null 2>&1 || true
+        echo "$__theme_name" > "$CUR_LIGHT_FILE"
+      fi
+    fi
+    $CMUX_BIN reload-config >/dev/null 2>&1 || true
+    exit 0
+    ;;
+
+  _prompt)
+    __slot="$(cat "$SLOT_FILE" 2>/dev/null || echo dark)"
+    if [ "$__slot" = "light" ]; then
+      printf '☀ light> '
+    else
+      printf '🌙 dark> '
+    fi
+    exit 0
+    ;;
+
+  _revert)
+    __orig_l="$(cat "$ORIG_LIGHT_FILE" 2>/dev/null || echo "")"
+    __orig_d="$(cat "$ORIG_DARK_FILE" 2>/dev/null || echo "")"
+    [ -n "$__orig_l" ] && $CMUX_BIN themes set --light "$__orig_l" >/dev/null 2>&1 || true
+    [ -n "$__orig_d" ] && $CMUX_BIN themes set --dark "$__orig_d" >/dev/null 2>&1 || true
+    $CMUX_BIN reload-config >/dev/null 2>&1 || true
+    rm -rf "$STATE_DIR" 2>/dev/null || true
+    exit 0
+    ;;
+
+  _cleanup)
+    rm -rf "$STATE_DIR" 2>/dev/null || true
+    exit 0
+    ;;
+esac
+
+# ── Usage ───────────────────────────────────────────────────────────────
+usage() {
+  cat <<EOF
+${BOLD}cmux-theme-picker${RESET} — Interactive terminal theme picker for cmux
+
+${BOLD}Usage:${RESET}
+  cmux-theme-picker          Pick a theme (auto-detects light/dark)
+  cmux-theme-picker --light  Start in LIGHT slot mode
+  cmux-theme-picker --dark   Start in DARK slot mode
+  cmux-theme-picker --pair   Pick both light and dark separately
+  cmux-theme-picker -h       Show this help
+
+${BOLD}Key bindings in picker:${RESET}
+  ↑/↓       Browse themes (live preview applied to terminal)
+  Tab       Toggle between LIGHT / DARK slot
+  Enter     Select theme (keeps current live preview)
+  Esc       Cancel and revert to original themes
+
+${BOLD}Requirements:${RESET}
+  fzf (brew install fzf), cmux
+EOF
+  exit 0
+}
+
+# ── Parse args ─────────────────────────────────────────────────────────
+MODE="auto"
+for arg in "$@"; do
+  case "$arg" in
+    --light) MODE="light" ;;
+    --dark)  MODE="dark" ;;
+    --pair)  MODE="pair" ;;
+    -h|--help) usage ;;
+    *) die "unknown argument: $arg (try -h for help)" ;;
+  esac
+done
+
+command -v fzf >/dev/null 2>&1 || die "fzf not found. Install with: brew install fzf"
+command -v "$CMUX_BIN" >/dev/null 2>&1 || die "cmux not found."
+
+# ── Read current themes ────────────────────────────────────────────────
+CURRENT_LIGHT="" CURRENT_DARK=""
+while IFS= read -r line; do
+  case "$line" in
+    "Current light:"*) CURRENT_LIGHT="${line#Current light: }" ;;
+    "Current dark:"*)  CURRENT_DARK="${line#Current dark: }" ;;
+  esac
+done < <($CMUX_BIN themes list 2>/dev/null)
+
+# ── Auto mode ───────────────────────────────────────────────────────────
+if [ "$MODE" = "auto" ]; then
+  if defaults read -g AppleInterfaceStyle 2>/dev/null | grep -q Dark; then
+    MODE="dark"
+  else
+    MODE="light"
+  fi
+fi
+
+# ── Initialize state dir ────────────────────────────────────────────────
+mkdir -p "$STATE_DIR"
+echo "$MODE" > "$SLOT_FILE"
+# Orig files: saved at startup, never modified — used by _revert
+echo "$CURRENT_LIGHT" > "$ORIG_LIGHT_FILE"
+echo "$CURRENT_DARK" > "$ORIG_DARK_FILE"
+# Current files: updated by _apply/_toggle — used by _preview display
+echo "$CURRENT_LIGHT" > "$CUR_LIGHT_FILE"
+echo "$CURRENT_DARK" > "$CUR_DARK_FILE"
+
+# Export state dir so fzf-spawned sub-commands can find it
+export CMUX_THEME_PICKER_STATE="$STATE_DIR"
+
+# ── Helper functions ───────────────────────────────────────────────────
+apply_theme() {
+  local theme="$1"
+  if [ "$MODE" = "light" ]; then
+    $CMUX_BIN themes set --light "$theme" >/dev/null 2>&1 || true
+  elif [ "$MODE" = "dark" ]; then
+    $CMUX_BIN themes set --dark "$theme" >/dev/null 2>&1 || true
+  fi
+  $CMUX_BIN reload-config >/dev/null 2>&1 || true
+}
+
+revert_theme() {
+  [ -n "$CURRENT_LIGHT" ] && $CMUX_BIN themes set --light "$CURRENT_LIGHT" >/dev/null 2>&1 || true
+  [ -n "$CURRENT_DARK" ] && $CMUX_BIN themes set --dark "$CURRENT_DARK" >/dev/null 2>&1 || true
+  $CMUX_BIN reload-config >/dev/null 2>&1 || true
+}
+
+# ── Resolve self path ─────────────────────────────────────────────────
+SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+
+# ── Write helper scripts for fzf bindings (avoids quoting hell) ────────
+# These tiny scripts are written at runtime so they embed the real paths.
+cat > "$STATE_DIR/fzf-apply" <<HELPER
+#!/bin/sh
+exec '$SELF' _apply "\$*"
+HELPER
+chmod +x "$STATE_DIR/fzf-apply"
+
+cat > "$STATE_DIR/fzf-toggle" <<HELPER
+#!/bin/sh
+exec '$SELF' _toggle "\$*"
+HELPER
+chmod +x "$STATE_DIR/fzf-toggle"
+
+cat > "$STATE_DIR/fzf-prompt" <<HELPER
+#!/bin/sh
+exec '$SELF' _prompt
+HELPER
+chmod +x "$STATE_DIR/fzf-prompt"
+
+cat > "$STATE_DIR/fzf-revert" <<HELPER
+#!/bin/sh
+exec '$SELF' _revert
+HELPER
+chmod +x "$STATE_DIR/fzf-revert"
+
+# ── Single picker ──────────────────────────────────────────────────────
+pick_one() {
+  local initial_prompt
+  if [ "$MODE" = "light" ]; then
+    initial_prompt="☀ light> "
+  else
+    initial_prompt="🌙 dark> "
+  fi
+
+  local apply_script="$STATE_DIR/fzf-apply"
+  local toggle_script="$STATE_DIR/fzf-toggle"
+  local prompt_script="$STATE_DIR/fzf-prompt"
+  local revert_script="$STATE_DIR/fzf-revert"
+
+  local selected
+  selected="$(list_themes | fzf \
+    --ansi \
+    --no-multi \
+    --layout=reverse \
+    --border=rounded \
+    --height=85% \
+    --min-height=25 \
+    --prompt="$initial_prompt" \
+    --header="Tab: toggle light/dark slot · Esc: revert" \
+    --preview="'$SELF' _preview {}" \
+    --preview-window=right:55%:border-rounded \
+    --color="fg:#c0c8d8,bg:#1a1a2e,hl:#79b3f7,fg+:#e2e8f1,bg+:#253040,hl+:#82c5fe,border:#3a3a5c,gutter:#16162a,header:#89cc7b,info:#79b3f7,pointer:#ee94db,marker:#e7c454,prompt:#44d6f1" \
+    --bind="focus:execute-silent($apply_script {})" \
+    --bind="tab:execute-silent($toggle_script {})+transform-prompt($prompt_script)+refresh-preview" \
+    --bind='enter:accept' \
+    --bind="esc:execute-silent($revert_script)+abort" \
+    2>&1)" || true
+
+  echo "$selected" | strip_marker
+}
+
+# ── Pair picker ─────────────────────────────────────────────────────────
+pick_pair() {
+  echo -e "${BOLD}Step 1: Pick a DARK theme${RESET}"
+  MODE=dark
+  echo "dark" > "$SLOT_FILE"
+  local dark_theme
+  dark_theme="$(pick_one)" || true
+  dark_theme="$(echo "$dark_theme" | strip_marker)"
+
+  echo -e "${BOLD}Step 2: Pick a LIGHT theme${RESET}"
+  MODE=light
+  echo "light" > "$SLOT_FILE"
+  local light_theme
+  light_theme="$(pick_one)" || true
+  light_theme="$(echo "$light_theme" | strip_marker)"
+
+  if [ -n "$dark_theme" ] && [ -n "$light_theme" ]; then
+    $CMUX_BIN themes set --light "$light_theme" --dark "$dark_theme"
+    $CMUX_BIN reload-config
+    echo -e "${GREEN}Set: light=${BOLD}$light_theme${RESET}${GREEN} dark=${BOLD}$dark_theme${RESET}"
+  else
+    revert_theme
+    echo "Cancelled. Original themes restored."
+  fi
+}
+
+# ── Main ────────────────────────────────────────────────────────────────
+trap 'rm -rf "$STATE_DIR" 2>/dev/null' EXIT
+
+if [ "$MODE" = "pair" ]; then
+  pick_pair
+  exit 0
+fi
+
+SELECTED="$(pick_one)"
+
+if [ -z "$SELECTED" ]; then
+  revert_theme
+  echo -e "${YELLOW}Cancelled. Reverted to: light=$CURRENT_LIGHT dark=$CURRENT_DARK${RESET}"
+  exit 0
+fi
+
+# Final apply to confirm
+apply_theme "$SELECTED"
+
+FINAL_SLOT="$(cat "$SLOT_FILE" 2>/dev/null || echo "$MODE")"
+FINAL_LIGHT="$(cat "$CUR_LIGHT_FILE" 2>/dev/null || echo "")"
+FINAL_DARK="$(cat "$CUR_DARK_FILE" 2>/dev/null || echo "")"
+echo -e "${GREEN}Theme set: ${BOLD}$SELECTED${RESET}${GREEN} (${FINAL_SLOT})${RESET}"
+echo -e "  light: ${FINAL_LIGHT}  dark: ${FINAL_DARK}"
