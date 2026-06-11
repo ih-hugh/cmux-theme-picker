@@ -2,7 +2,13 @@
 
 Interactive terminal theme picker for [cmux](https://cmux.app) (Ghostty-based terminal). Browse themes with live preview, toggle between light/dark slots, and apply changes instantly.
 
-![Terminal theme picker in action](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue)
+[![Homebrew](https://img.shields.io/badge/homebrew-ih--hugh%2Ftap-yellow?logo=homebrew)](https://github.com/ih-hugh/homebrew-tap)
+![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue)
+
+```bash
+brew tap ih-hugh/tap
+brew install cmux-theme-picker
+```
 
 ## Features
 
