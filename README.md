@@ -15,7 +15,7 @@ brew install cmux-theme-picker
 - **Live preview** — as you scroll through themes with ↑/↓, each one is applied to your terminal in real time
 - **Light/dark slot switching** — press Tab to toggle between the light and dark theme slot, preview themes in either context
 - **Color swatches** — the preview pane renders background, foreground, selection, and full ANSI palette blocks
-- **Duskbox markers** — themes from the [duskbox](https://github.com/nicm/duskbox) collection are marked with ★
+- **Duskbox markers** — themes from the [duskbox](https://github.com/ih-hugh/duskbox) collection are marked with ★
 - **Pair mode** — pick both light and dark themes in sequence with `--pair`
 - **Safe revert** — pressing Esc restores your original themes
 - **Auto mode detection** — defaults to the slot matching your macOS appearance (light/dark)
