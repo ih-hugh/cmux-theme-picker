@@ -6,6 +6,7 @@
 #   cmux-theme-picker --light  Start in LIGHT slot mode
 #   cmux-theme-picker --dark   Start in DARK slot mode
 #   cmux-theme-picker --pair   Pick both light and dark separately
+#   cmux-theme-picker --update Download/refresh the duskbox themes from ih-hugh/duskbox
 #   cmux-theme-picker -h       Show help
 #
 # Key bindings in picker:
@@ -228,6 +229,7 @@ ${BOLD}Usage:${RESET}
   cmux-theme-picker --light  Start in LIGHT slot mode
   cmux-theme-picker --dark   Start in DARK slot mode
   cmux-theme-picker --pair   Pick both light and dark separately
+  cmux-theme-picker --update Download/refresh the duskbox themes (from ih-hugh/duskbox main)
   cmux-theme-picker -h       Show this help
 
 ${BOLD}Key bindings in picker:${RESET}
@@ -242,10 +244,35 @@ EOF
   exit 0
 }
 
+# ── Theme updater ──────────────────────────────────────────────────────
+# Pulls the duskbox Ghostty themes from the repo's main branch into the user-writable
+# theme dirs (cmux app-support + ghostty config). Idempotent; run after duskbox releases.
+update_themes() {
+  local api="https://api.github.com/repos/ih-hugh/duskbox/contents/extras/ghostty"
+  local raw="https://raw.githubusercontent.com/ih-hugh/duskbox/main/extras/ghostty"
+  command -v curl >/dev/null 2>&1 || die "curl not found"
+  local names
+  names=$(curl -fsSL "$api" | grep -o '"name": *"duskbox-[^"]*"' | cut -d'"' -f4) || die "could not list themes (GitHub API)"
+  [[ -n "$names" ]] || die "no duskbox themes found upstream"
+  local dirs=("$HOME/Library/Application Support/com.cmuxterm.app/themes" "$HOME/.config/ghostty/themes")
+  local d n count=0
+  for d in "${dirs[@]}"; do mkdir -p "$d"; done
+  for n in $names; do
+    curl -fsSL "$raw/$n" -o "/tmp/$n.dbx.$$" || die "download failed: $n"
+    for d in "${dirs[@]}"; do cp "/tmp/$n.dbx.$$" "$d/$n"; done
+    rm -f "/tmp/$n.dbx.$$"
+    count=$((count+1))
+  done
+  echo "updated $count duskbox themes in: ${dirs[0]} + ${dirs[1]}"
+  echo "restart cmux/Ghostty (or re-pick) to load the new colors"
+  exit 0
+}
+
 # ── Parse args ─────────────────────────────────────────────────────────
 MODE="auto"
 for arg in "$@"; do
   case "$arg" in
+    --update) update_themes ;;
     --light) MODE="light" ;;
     --dark)  MODE="dark" ;;
     --pair)  MODE="pair" ;;
